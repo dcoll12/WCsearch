@@ -152,8 +152,10 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Score"] = df["Score"].round(1)
 
-    # Deadline parsing
+    # Deadline parsing — parse then strip any timezone so comparisons stay tz-naive
     df["Next Deadline"] = pd.to_datetime(df["Next Deadline"], errors="coerce")
+    if pd.api.types.is_datetime64tz_dtype(df["Next Deadline"]):
+        df["Next Deadline"] = df["Next Deadline"].dt.tz_localize(None)
 
     # Boolean-ish fields
     for col in ("Is Custom", "Rolling"):
@@ -335,7 +337,7 @@ def main():
             )
         ]
 
-    today = pd.Timestamp(date.today())
+    today = pd.Timestamp(date.today()).normalize()
     if deadline_filter == "Next 30 days":
         filtered = filtered[
             filtered["Next Deadline"].notna() &
