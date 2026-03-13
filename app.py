@@ -91,7 +91,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-SHEET_ID = "1liZmyLwoMShmDAU0ANM8gJzAB5Fx3Ygf6udGCf6gl2Y"
+SHEET_ID = "1ixKVIO7xeyuGL9n4Afnz10lJ0-Pyxlsm"
 EXPECTED_COLS = [
     "Rank", "Score", "Grant Name", "Grant ID", "Funder",
     "Next Deadline", "Status", "Is Custom", "Rolling",
