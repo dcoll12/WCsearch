@@ -152,10 +152,14 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Score"] = df["Score"].round(1)
 
-    # Deadline parsing — parse via UTC to handle any tz strings, then strip tz.
-    # Cast to datetime64[ns] for consistent comparisons across all pandas versions.
+    # Deadline parsing — keep as datetime for charts, but also store a plain
+    # Python date column (_dl_date) used for ALL filtering so we never hit
+    # pandas datetime dtype/resolution mismatches across pandas versions.
     parsed = pd.to_datetime(df["Next Deadline"], errors="coerce", utc=True)
-    df["Next Deadline"] = parsed.dt.tz_convert(None).astype("datetime64[ns]")
+    df["Next Deadline"] = parsed.dt.tz_convert(None)  # tz-naive for display/charts
+    df["_dl_date"] = df["Next Deadline"].apply(
+        lambda x: x.date() if pd.notna(x) else None
+    )
 
     # Boolean-ish fields
     for col in ("Is Custom", "Rolling"):
@@ -337,26 +341,23 @@ def main():
             )
         ]
 
-    today = pd.Timestamp(date.today())  # tz-naive, matches datetime64[ns] column
+    today = date.today()  # plain Python date — used everywhere for filtering
+    today_ts = pd.Timestamp(today)  # used only for charts/Gantt
+
+    def _dl_gte(d, ref): return d is not None and d >= ref
+    def _dl_lte(d, ref): return d is not None and d <= ref
+    def _dl_lt(d, ref):  return d is not None and d < ref
+
     if deadline_filter == "Next 30 days":
-        filtered = filtered[
-            filtered["Next Deadline"].notna() &
-            (filtered["Next Deadline"] >= today) &
-            (filtered["Next Deadline"] <= today + pd.Timedelta(days=30))
-        ]
+        cut = today + pd.Timedelta(days=30).to_pytimedelta()
+        filtered = filtered[filtered["_dl_date"].apply(lambda d: _dl_gte(d, today) and _dl_lte(d, cut))]
     elif deadline_filter == "Next 90 days":
-        filtered = filtered[
-            filtered["Next Deadline"].notna() &
-            (filtered["Next Deadline"] >= today) &
-            (filtered["Next Deadline"] <= today + pd.Timedelta(days=90))
-        ]
+        cut = today + pd.Timedelta(days=90).to_pytimedelta()
+        filtered = filtered[filtered["_dl_date"].apply(lambda d: _dl_gte(d, today) and _dl_lte(d, cut))]
     elif deadline_filter == "Overdue":
-        filtered = filtered[
-            filtered["Next Deadline"].notna() &
-            (filtered["Next Deadline"] < today)
-        ]
+        filtered = filtered[filtered["_dl_date"].apply(lambda d: _dl_lt(d, today))]
     elif deadline_filter == "Rolling / TBD":
-        filtered = filtered[filtered["Next Deadline"].isna() | filtered["Rolling"]]
+        filtered = filtered[filtered["_dl_date"].isna() | filtered["Rolling"]]
 
     if search_query:
         q = search_query.lower()
@@ -394,11 +395,8 @@ def main():
     total_grants = len(df)
     avg_score    = df["Score"].mean() if len(df) > 0 else 0
     high_match   = len(df[df["Score"] >= 70])
-    upcoming_dl  = len(df[
-        df["Next Deadline"].notna() &
-        (df["Next Deadline"] >= today) &
-        (df["Next Deadline"] <= today + pd.Timedelta(days=30))
-    ])
+    cut30 = today + pd.Timedelta(days=30).to_pytimedelta()
+    upcoming_dl = len(df[df["_dl_date"].apply(lambda d: _dl_gte(d, today) and _dl_lte(d, cut30))])
     awarded = len(df[df["Status"].str.lower() == "awarded"])
 
     kpis = [
@@ -585,7 +583,9 @@ def main():
             with row2_c2:
                 scatter_df = filtered[filtered["Next Deadline"].notna()].copy()
                 if not scatter_df.empty:
-                    scatter_df["Days Until"] = (scatter_df["Next Deadline"] - today).dt.days
+                    scatter_df["Days Until"] = scatter_df["_dl_date"].apply(
+                        lambda d: (d - today).days if d is not None else None
+                    )
                     scatter_df["Color"] = scatter_df["Score"].apply(match_color)
                     fig_scatter = px.scatter(
                         scatter_df,
@@ -663,16 +663,21 @@ def main():
             st.info("No dated deadlines in current filter set.")
         else:
             # Gantt-style timeline
-            dated["Days Until"] = (dated["Next Deadline"] - today).dt.days
-            dated["Label"]      = dated.apply(
+            dated["Days Until"] = dated["_dl_date"].apply(
+                lambda d: (d - today).days if d is not None else None
+            )
+            dated["Label"] = dated.apply(
                 lambda r: f"{r['Grant Name'][:40]} | {r['Score']:.0f}%", axis=1
             )
             dated["Color"] = dated["Score"].apply(match_color)
 
+            today_str = today.isoformat()
             fig_gantt = px.timeline(
                 dated.assign(
-                    Start=today.strftime("%Y-%m-%d"),
-                    Finish=dated["Next Deadline"].dt.strftime("%Y-%m-%d"),
+                    Start=today_str,
+                    Finish=dated["_dl_date"].apply(
+                        lambda d: d.isoformat() if d is not None else today_str
+                    ),
                 ),
                 x_start="Start",
                 x_end="Finish",
@@ -695,7 +700,7 @@ def main():
                 yaxis_title="",
             )
             fig_gantt.add_vline(
-                x=today.timestamp() * 1000,
+                x=today_ts.timestamp() * 1000,
                 line_dash="dash",
                 line_color="#FF9800",
                 annotation_text="Today",
@@ -728,7 +733,9 @@ def main():
         ]
         display_df = filtered[[c for c in display_cols if c in filtered.columns]].copy()
         display_df["Score"] = display_df["Score"].apply(lambda x: f"{x:.1f}%")
-        display_df["Next Deadline"] = display_df["Next Deadline"].dt.strftime("%Y-%m-%d").fillna("Rolling / TBD")
+        display_df["Next Deadline"] = filtered["_dl_date"].apply(
+            lambda d: d.isoformat() if d is not None else "Rolling / TBD"
+        )
 
         st.dataframe(
             display_df,
