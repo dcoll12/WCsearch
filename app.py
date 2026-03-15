@@ -61,10 +61,9 @@ def normalize_df(df):
     for col in EXPECTED_COLS:
         if col not in df.columns:
             df[col] = ""
-    df["Score"] = pd.to_numeric(df["Score"], errors="coerce").fillna(0)
+    # Keep raw decimal scores (0.01–0.50 scale); do not normalize to percentage
+    df["Score"] = pd.to_numeric(df["Score"], errors="coerce").fillna(0).round(4)
     df["Rank"]  = pd.to_numeric(df["Rank"],  errors="coerce").fillna(0)
-    mx = df["Score"].max()
-    df["Score"] = ((df["Score"] / mx * 100) if mx > 100 else df["Score"]).round(1)
 
     parsed = pd.to_datetime(df["Next Deadline"], errors="coerce", utc=True)
     df["Next Deadline"] = parsed.dt.tz_convert(None)
@@ -79,7 +78,16 @@ def normalize_df(df):
 
 
 def match_color(s):
-    return "#4CAF50" if s >= 80 else "#8BC34A" if s >= 60 else "#FF9800" if s >= 40 else "#EF5350"
+    # Raw score scale: ≥0.10 very strong · ≥0.05 good · ≥0.02 moderate · ≥0.01 weak · <0.01 very weak
+    return "#4CAF50" if s >= 0.10 else "#8BC34A" if s >= 0.05 else "#FF9800" if s >= 0.02 else "#FF7043" if s >= 0.01 else "#EF5350"
+
+
+def score_label(s):
+    if s >= 0.10: return "Very Strong"
+    if s >= 0.05: return "Good"
+    if s >= 0.02: return "Moderate"
+    if s >= 0.01: return "Weak"
+    return "Very Weak"
 
 
 def deadline_label(dt):
@@ -98,7 +106,8 @@ def status_badge_html(s):
 
 def score_pill_html(score):
     c = match_color(score)
-    return f'<span class="score-pill" style="background:{c}22;color:{c};border:1px solid {c}55;">{score:.0f}% match</span>'
+    label = score_label(score)
+    return f'<span class="score-pill" style="background:{c}22;color:{c};border:1px solid {c}55;">{score:.4f} · {label}</span>'
 
 
 # ── Monday.com helpers ──
@@ -176,8 +185,9 @@ def main():
 
     # ── Sidebar filters ──
     with st.sidebar:
-        mn, mx2 = int(df["Score"].min()), int(df["Score"].max())
-        score_range = st.slider("Match score %", mn, max(mx2, 1), (mn, max(mx2, 1)))
+        mn, mx2 = float(df["Score"].min()), float(df["Score"].max())
+        score_range = st.slider("Match score", float(mn), max(float(mx2), 0.001),
+                                (float(mn), max(float(mx2), 0.001)), step=0.001, format="%.3f")
         all_statuses = sorted(df["Status"].unique())
         selected_statuses = st.multiselect("Status", all_statuses, default=all_statuses)
         st.markdown('<div class="sidebar-section">Deadline</div>', unsafe_allow_html=True)
@@ -237,8 +247,8 @@ def main():
     awarded_count = len(df[df["Status"].str.lower() == "awarded"])
     kpis = [
         (c1, str(len(df)), "Total Grants"),
-        (c2, f"{df['Score'].mean():.0f}%" if len(df) else "—", "Avg Match Score"),
-        (c3, str(len(df[df["Score"] >= 70])), "High Matches (≥70%)"),
+        (c2, f"{df['Score'].mean():.4f}" if len(df) else "—", "Avg Score"),
+        (c3, str(len(df[df["Score"] >= 0.10])), "Very Strong (≥0.10)"),
         (c4, str(len(df[df["_dl_date"].apply(lambda d: gte(d, today) and lte(d, cut30))])), "Due in 30 Days"),
         (c5, str(awarded_count), "Awarded"),
     ]
@@ -268,7 +278,8 @@ def main():
                     c1, c2, c3 = st.columns([3, 2, 2])
                     with c1:
                         st.markdown(f"{score_pill_html(score)} {status_badge_html(row['Status'])}", unsafe_allow_html=True)
-                        st.markdown(f'<div class="match-bar-wrap"><div class="match-bar" style="width:{score}%;background:{bar_color};"></div></div>', unsafe_allow_html=True)
+                        bar_pct = min(score / 0.50 * 100, 100)  # scale 0–0.50 → 0–100% for bar width
+                        st.markdown(f'<div class="match-bar-wrap"><div class="match-bar" style="width:{bar_pct:.1f}%;background:{bar_color};"></div></div>', unsafe_allow_html=True)
                         st.markdown(f"**Funder:** {row['Funder']}")
                         if row["Funding Cycle"]: st.markdown(f"**Cycle:** {row['Funding Cycle']}")
                     with c2:
@@ -277,7 +288,7 @@ def main():
                         if website_url.startswith("http"): st.markdown(f"[🌐 Website]({website_url})")
                         if matched_url.startswith("http"): st.markdown(f"[🔍 Matched Source]({matched_url})")
                     with c3:
-                        st.markdown(f"**Match Score:** `{score:.1f}%`")
+                        st.markdown(f"**Score:** `{score:.4f}` — {score_label(score)}")
                         if row["Rank"]: st.markdown(f"**Rank:** #{int(row['Rank'])}")
                     desc = row.get("Description", "").strip()
                     if desc:
@@ -300,9 +311,9 @@ def main():
                 fig = px.histogram(f, x="Score", nbins=20, title="Match Score Distribution",
                                    color_discrete_sequence=["#4CAF50"], template="plotly_dark")
                 fig.update_layout(paper_bgcolor="#1A1D27", plot_bgcolor="#1A1D27", bargap=0.05,
-                                  xaxis_title="Match %", yaxis_title="# Grants", margin=dict(t=40, b=20, l=20, r=20))
+                                  xaxis_title="Score", yaxis_title="# Grants", margin=dict(t=40, b=20, l=20, r=20))
                 fig.add_vline(x=f["Score"].mean(), line_dash="dash", line_color="#FF9800",
-                              annotation_text=f"Avg {f['Score'].mean():.0f}%", annotation_position="top right")
+                              annotation_text=f"Avg {f['Score'].mean():.4f}", annotation_position="top right")
                 st.plotly_chart(fig, use_container_width=True)
             with r1c2:
                 sc = f["Status"].value_counts().reset_index(); sc.columns = ["Status", "Count"]
@@ -323,10 +334,10 @@ def main():
                               color_continuous_scale=["#EF5350", "#FF9800", "#4CAF50"],
                               title="Top Funders by Avg Match Score", template="plotly_dark",
                               hover_data={"# Grants": True}, text="Avg Score")
-                fig3.update_traces(texttemplate="%{text:.0f}%", textposition="outside")
+                fig3.update_traces(texttemplate="%{text:.4f}", textposition="outside")
                 fig3.update_layout(paper_bgcolor="#1A1D27", plot_bgcolor="#1A1D27", coloraxis_showscale=False,
                                    yaxis={"categoryorder": "total ascending"}, margin=dict(t=40, b=20, l=20, r=20),
-                                   xaxis_title="Avg Match %", yaxis_title="")
+                                   xaxis_title="Avg Score", yaxis_title="")
                 st.plotly_chart(fig3, use_container_width=True)
             with r2c2:
                 sd = f[f["Next Deadline"].notna()].copy()
@@ -334,9 +345,9 @@ def main():
                     sd["Days Until"] = sd["_dl_date"].apply(lambda d: (d - today).days if d else None)
                     fig4 = px.scatter(sd, x="Days Until", y="Score", color="Score",
                                       color_continuous_scale=["#EF5350", "#FF9800", "#4CAF50"], size="Score",
-                                      hover_name="Grant Name", hover_data={"Funder": True, "Status": True, "Score": ":.1f"},
-                                      title="Match Score vs Days Until Deadline", template="plotly_dark",
-                                      labels={"Days Until": "Days Until Deadline", "Score": "Match %"})
+                                      hover_name="Grant Name", hover_data={"Funder": True, "Status": True, "Score": ":.4f"},
+                                      title="Score vs Days Until Deadline", template="plotly_dark",
+                                      labels={"Days Until": "Days Until Deadline", "Score": "Score"})
                     fig4.update_layout(paper_bgcolor="#1A1D27", plot_bgcolor="#1A1D27", coloraxis_showscale=False,
                                        margin=dict(t=40, b=20, l=20, r=20))
                     fig4.add_vline(x=0, line_dash="dash", line_color="#EF5350", annotation_text="Today")
@@ -442,13 +453,13 @@ Each grant becomes a Monday.com item with its name as the title and a comment co
         disp_cols = ["Rank", "Score", "Grant Name", "Funder", "Status", "Next Deadline",
                      "Funding Cycle", "Grant URL", "Website URL", "Matched URL"]
         disp = f[[c for c in disp_cols if c in f.columns]].copy()
-        disp["Score"] = disp["Score"].apply(lambda x: f"{x:.1f}%")
+        disp["Score"] = disp["Score"].apply(lambda x: f"{x:.4f}")
         disp["Next Deadline"] = f["_dl_date"].apply(lambda d: d.isoformat() if d else "Rolling / TBD")
         st.dataframe(disp, use_container_width=True, hide_index=True, column_config={
             "Grant URL":   st.column_config.LinkColumn("Grant URL",   display_text="🔗 Link"),
             "Website URL": st.column_config.LinkColumn("Website URL", display_text="🌐 Link"),
             "Matched URL": st.column_config.LinkColumn("Matched URL", display_text="🔍 Link"),
-            "Score":       st.column_config.TextColumn("Match %"),
+            "Score":       st.column_config.TextColumn("Score"),
         })
         st.download_button(
             "⬇️ Download filtered data as CSV",
@@ -461,27 +472,27 @@ Each grant becomes a Monday.com item with its name as the title and a comment co
 def demo_data():
     today = date.today()
     rows = [
-        [1, 92, "Climate Resilience Fund", "Bezos Earth Fund",
+        [1, 0.42, "Climate Resilience Fund", "Bezos Earth Fund",
          (pd.Timestamp(today) + pd.Timedelta(days=25)).strftime("%Y-%m-%d"),
          "Active", "Annual", "https://example.com/1", "https://bezos.com",
          "Supports innovative approaches to climate resilience in coastal communities.\n\nFunds projects that demonstrate measurable impact on community adaptation to changing climate conditions. Priority given to Indigenous-led initiatives and frontline communities.",
          "https://example.com/m1"],
-        [2, 85, "Green Infrastructure Grant", "Patagonia Environmental",
+        [2, 0.18, "Green Infrastructure Grant", "Patagonia Environmental",
          (pd.Timestamp(today) + pd.Timedelta(days=60)).strftime("%Y-%m-%d"),
          "Researching", "Biannual", "https://example.com/2", "https://patagonia.com",
          "Funding for urban green infrastructure projects including green roofs, rain gardens, and urban tree canopy expansion. Focus on equity and underserved communities.",
          "https://example.com/m2"],
-        [3, 78, "Community Health Initiative", "Robert Wood Johnson",
+        [3, 0.07, "Community Health Initiative", "Robert Wood Johnson",
          (pd.Timestamp(today) + pd.Timedelta(days=90)).strftime("%Y-%m-%d"),
          "Applied", "Rolling", "https://example.com/3", "https://rwjf.org",
          "Improving health outcomes in rural communities through preventive care and mental health services.",
          "https://example.com/m3"],
-        [4, 65, "Watershed Restoration", "Gordon & Betty Moore",
+        [4, 0.03, "Watershed Restoration", "Gordon & Betty Moore",
          (pd.Timestamp(today) - pd.Timedelta(days=5)).strftime("%Y-%m-%d"),
          "Invited", "Annual", "https://example.com/4", "https://moore.org",
          "Protecting critical watershed ecosystems through strategic land conservation and restoration.",
          "https://example.com/m4"],
-        [5, 88, "Biodiversity Conservation", "Wilburforce Foundation",
+        [5, 0.12, "Biodiversity Conservation", "Wilburforce Foundation",
          (pd.Timestamp(today) + pd.Timedelta(days=10)).strftime("%Y-%m-%d"),
          "Awarded", "Annual", "https://example.com/7", "https://wilburforce.org",
          "Protecting endangered species and critical habitat across the Rocky Mountain region.",
