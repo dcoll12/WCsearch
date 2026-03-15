@@ -27,8 +27,9 @@ st.markdown("""<style>
 
 # Updated sheet ID and columns to match new spreadsheet format
 SHEET_ID = "1HGmlZoCiQvRb7CTHqh-ZjqcTTQ_nmGXdogqyYp7mQi8"
-EXPECTED_COLS = ["Rank", "Score", "Grant Name", "Funder", "Next Deadline", "Status",
-                 "Funding Cycle", "Grant URL", "Website URL", "Description", "Matched URL"]
+SHEET_GID = "969887567"
+EXPECTED_COLS = ["Score", "Grant Name", "Funder", "Next Deadline", "Status",
+                 "Funding Cycle", "Grant URL", "Website URL", "Description"]
 
 STATUS_COLORS = {
     "Active":      ("#1B5E20", "#66BB6A"),
@@ -46,7 +47,7 @@ MONDAY_API_URL = "https://api.monday.com/v2"
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_from_public_csv(sheet_id):
-    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={SHEET_GID}"
     return pd.read_csv(url)
 
 
@@ -54,7 +55,7 @@ def load_from_service_account(sheet_id, creds_json):
     scopes = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
     gc = gspread.authorize(creds)
-    return pd.DataFrame(gc.open_by_key(sheet_id).get_worksheet(0).get_all_records())
+    return pd.DataFrame(gc.open_by_key(sheet_id).get_worksheet_by_id(int(SHEET_GID)).get_all_records())
 
 
 def normalize_df(df):
@@ -62,7 +63,6 @@ def normalize_df(df):
         if col not in df.columns:
             df[col] = ""
     df["Score"] = pd.to_numeric(df["Score"], errors="coerce").fillna(0)
-    df["Rank"]  = pd.to_numeric(df["Rank"],  errors="coerce").fillna(0)
     mx = df["Score"].max()
     df["Score"] = ((df["Score"] / mx * 100) if mx > 100 else df["Score"]).round(1)
 
@@ -71,7 +71,7 @@ def normalize_df(df):
     df["_dl_date"] = df["Next Deadline"].apply(lambda x: x.date() if pd.notna(x) else None)
 
     df["Status"] = df["Status"].fillna("").astype(str).str.strip()
-    for col in ("Grant Name", "Funder", "Funding Cycle", "Description", "Website URL", "Matched URL"):
+    for col in ("Grant Name", "Funder", "Funding Cycle", "Description", "Website URL"):
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
     df["Grant URL"] = df["Grant URL"].fillna("").astype(str).str.strip()
@@ -185,7 +185,7 @@ def main():
         st.markdown('<div class="sidebar-section">Search</div>', unsafe_allow_html=True)
         search_query = st.text_input("Search grants", placeholder="Keyword, funder…")
         st.markdown('<div class="sidebar-section">Sort</div>', unsafe_allow_html=True)
-        sort_by = st.selectbox("Sort by", ["Score (high→low)", "Score (low→high)", "Deadline (soonest)", "Rank", "Funder A-Z"])
+        sort_by = st.selectbox("Sort by", ["Score (high→low)", "Score (low→high)", "Deadline (soonest)", "Funder A-Z"])
 
     # ── Filtering ──
     f = df.copy()
@@ -221,7 +221,7 @@ def main():
 
     sort_map = {
         "Score (high→low)": ("Score", False), "Score (low→high)": ("Score", True),
-        "Deadline (soonest)": ("Next Deadline", True), "Rank": ("Rank", True), "Funder A-Z": ("Funder", True),
+        "Deadline (soonest)": ("Next Deadline", True), "Funder A-Z": ("Funder", True),
     }
     col_s, asc_s = sort_map.get(sort_by, ("Score", False))
     f = f.sort_values(col_s, ascending=asc_s, na_position="last")
@@ -262,7 +262,6 @@ def main():
                 bar_color = match_color(score)
                 url = row["Grant URL"]
                 website_url = row.get("Website URL", "")
-                matched_url = row.get("Matched URL", "")
                 dl_text, dl_class = deadline_label(row["Next Deadline"])
                 with st.expander(f"{'⭐ ' if score >= 80 else ''}{row['Grant Name']} — {row['Funder']}", expanded=False):
                     c1, c2, c3 = st.columns([3, 2, 2])
@@ -275,10 +274,8 @@ def main():
                         st.markdown(f'**Deadline:** <span class="{dl_class}">{dl_text}</span>', unsafe_allow_html=True)
                         if url.startswith("http"): st.markdown(f"[🔗 Grant URL]({url})")
                         if website_url.startswith("http"): st.markdown(f"[🌐 Website]({website_url})")
-                        if matched_url.startswith("http"): st.markdown(f"[🔍 Matched Source]({matched_url})")
                     with c3:
                         st.markdown(f"**Match Score:** `{score:.1f}%`")
-                        if row["Rank"]: st.markdown(f"**Rank:** #{int(row['Rank'])}")
                     desc = row.get("Description", "").strip()
                     if desc:
                         st.markdown("---")
@@ -439,15 +436,14 @@ Each grant becomes a Monday.com item with its name as the title and a comment co
 
     # ── Tab 5: Raw Table ──
     with tab_table:
-        disp_cols = ["Rank", "Score", "Grant Name", "Funder", "Status", "Next Deadline",
-                     "Funding Cycle", "Grant URL", "Website URL", "Matched URL"]
+        disp_cols = ["Score", "Grant Name", "Funder", "Status", "Next Deadline",
+                     "Funding Cycle", "Grant URL", "Website URL"]
         disp = f[[c for c in disp_cols if c in f.columns]].copy()
         disp["Score"] = disp["Score"].apply(lambda x: f"{x:.1f}%")
         disp["Next Deadline"] = f["_dl_date"].apply(lambda d: d.isoformat() if d else "Rolling / TBD")
         st.dataframe(disp, use_container_width=True, hide_index=True, column_config={
             "Grant URL":   st.column_config.LinkColumn("Grant URL",   display_text="🔗 Link"),
             "Website URL": st.column_config.LinkColumn("Website URL", display_text="🌐 Link"),
-            "Matched URL": st.column_config.LinkColumn("Matched URL", display_text="🔍 Link"),
             "Score":       st.column_config.TextColumn("Match %"),
         })
         st.download_button(
@@ -461,31 +457,26 @@ Each grant becomes a Monday.com item with its name as the title and a comment co
 def demo_data():
     today = date.today()
     rows = [
-        [1, 92, "Climate Resilience Fund", "Bezos Earth Fund",
+        [92, "Climate Resilience Fund", "Bezos Earth Fund",
          (pd.Timestamp(today) + pd.Timedelta(days=25)).strftime("%Y-%m-%d"),
          "Active", "Annual", "https://example.com/1", "https://bezos.com",
-         "Supports innovative approaches to climate resilience in coastal communities.\n\nFunds projects that demonstrate measurable impact on community adaptation to changing climate conditions. Priority given to Indigenous-led initiatives and frontline communities.",
-         "https://example.com/m1"],
-        [2, 85, "Green Infrastructure Grant", "Patagonia Environmental",
+         "Supports innovative approaches to climate resilience in coastal communities.\n\nFunds projects that demonstrate measurable impact on community adaptation to changing climate conditions. Priority given to Indigenous-led initiatives and frontline communities."],
+        [85, "Green Infrastructure Grant", "Patagonia Environmental",
          (pd.Timestamp(today) + pd.Timedelta(days=60)).strftime("%Y-%m-%d"),
          "Researching", "Biannual", "https://example.com/2", "https://patagonia.com",
-         "Funding for urban green infrastructure projects including green roofs, rain gardens, and urban tree canopy expansion. Focus on equity and underserved communities.",
-         "https://example.com/m2"],
-        [3, 78, "Community Health Initiative", "Robert Wood Johnson",
+         "Funding for urban green infrastructure projects including green roofs, rain gardens, and urban tree canopy expansion. Focus on equity and underserved communities."],
+        [78, "Community Health Initiative", "Robert Wood Johnson",
          (pd.Timestamp(today) + pd.Timedelta(days=90)).strftime("%Y-%m-%d"),
          "Applied", "Rolling", "https://example.com/3", "https://rwjf.org",
-         "Improving health outcomes in rural communities through preventive care and mental health services.",
-         "https://example.com/m3"],
-        [4, 65, "Watershed Restoration", "Gordon & Betty Moore",
+         "Improving health outcomes in rural communities through preventive care and mental health services."],
+        [65, "Watershed Restoration", "Gordon & Betty Moore",
          (pd.Timestamp(today) - pd.Timedelta(days=5)).strftime("%Y-%m-%d"),
          "Invited", "Annual", "https://example.com/4", "https://moore.org",
-         "Protecting critical watershed ecosystems through strategic land conservation and restoration.",
-         "https://example.com/m4"],
-        [5, 88, "Biodiversity Conservation", "Wilburforce Foundation",
+         "Protecting critical watershed ecosystems through strategic land conservation and restoration."],
+        [88, "Biodiversity Conservation", "Wilburforce Foundation",
          (pd.Timestamp(today) + pd.Timedelta(days=10)).strftime("%Y-%m-%d"),
          "Awarded", "Annual", "https://example.com/7", "https://wilburforce.org",
-         "Protecting endangered species and critical habitat across the Rocky Mountain region.",
-         "https://example.com/m5"],
+         "Protecting endangered species and critical habitat across the Rocky Mountain region."],
     ]
     return normalize_df(pd.DataFrame(rows, columns=EXPECTED_COLS))
 
