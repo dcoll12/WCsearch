@@ -4,6 +4,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 import json
+import re
+import html as html_mod
 import requests
 import os
 from datetime import datetime, date, timedelta
@@ -70,11 +72,26 @@ def normalize_df(df):
     df["_dl_date"] = df["Next Deadline"].apply(lambda x: x.date() if pd.notna(x) else None)
 
     df["Status"] = df["Status"].fillna("").astype(str).str.strip()
-    for col in ("Grant Name", "Funder", "Funding Cycle", "Description", "Website URL", "Matched URL"):
+    for col in ("Grant Name", "Funder", "Funding Cycle", "Website URL", "Matched URL"):
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
+    # Strip HTML tags from description
+    df["Description"] = df["Description"].fillna("").astype(str).apply(strip_html)
     df["Grant URL"] = df["Grant URL"].fillna("").astype(str).str.strip()
     return df
+
+
+def strip_html(text):
+    """Strip HTML tags and unescape entities from description text."""
+    if not text:
+        return ""
+    text = html_mod.unescape(text)           # &amp; → & etc.
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)   # <br> → newline
+    text = re.sub(r"</p>", "\n\n", text, flags=re.IGNORECASE)      # </p> → paragraph break
+    text = re.sub(r"<li>", "• ", text, flags=re.IGNORECASE)        # <li> → bullet
+    text = re.sub(r"<[^>]+>", "", text)      # strip remaining tags
+    text = re.sub(r"\n{3,}", "\n\n", text)   # collapse excess blank lines
+    return text.strip()
 
 
 def match_color(s):
@@ -284,9 +301,9 @@ def main():
                         if row["Funding Cycle"]: st.markdown(f"**Cycle:** {row['Funding Cycle']}")
                     with c2:
                         st.markdown(f'**Deadline:** <span class="{dl_class}">{dl_text}</span>', unsafe_allow_html=True)
+                        if matched_url.startswith("http"): st.markdown(f"[🌐 Site URL]({matched_url})")
                         if url.startswith("http"): st.markdown(f"[🔗 Grant URL]({url})")
-                        if website_url.startswith("http"): st.markdown(f"[🌐 Website]({website_url})")
-                        if matched_url.startswith("http"): st.markdown(f"[🔍 Matched Source]({matched_url})")
+                        if website_url.startswith("http"): st.markdown(f"[🔗 Website URL]({website_url})")
                     with c3:
                         st.markdown(f"**Score:** `{score:.4f}` — {score_label(score)}")
                         if row["Rank"]: st.markdown(f"**Rank:** #{int(row['Rank'])}")
@@ -458,7 +475,7 @@ Each grant becomes a Monday.com item with its name as the title and a comment co
         st.dataframe(disp, use_container_width=True, hide_index=True, column_config={
             "Grant URL":   st.column_config.LinkColumn("Grant URL",   display_text="🔗 Link"),
             "Website URL": st.column_config.LinkColumn("Website URL", display_text="🌐 Link"),
-            "Matched URL": st.column_config.LinkColumn("Matched URL", display_text="🔍 Link"),
+            "Matched URL": st.column_config.LinkColumn("Site URL",    display_text="🌐 Site"),
             "Score":       st.column_config.TextColumn("Score"),
         })
         st.download_button(
