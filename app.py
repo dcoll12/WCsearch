@@ -28,7 +28,7 @@ st.markdown("""<style>
 # Updated sheet ID and columns to match new spreadsheet format
 SHEET_ID = "1HGmlZoCiQvRb7CTHqh-ZjqcTTQ_nmGXdogqyYp7mQi8"
 SHEET_GID = "969887567"
-EXPECTED_COLS = ["Score", "Grant Name", "Funder", "Next Deadline", "Status",
+EXPECTED_COLS = ["Rank", "Score", "Grant Name", "Funder", "Next Deadline", "Status",
                  "Funding Cycle", "Grant URL", "Website URL", "Description"]
 
 STATUS_COLORS = {
@@ -62,6 +62,7 @@ def normalize_df(df):
     for col in EXPECTED_COLS:
         if col not in df.columns:
             df[col] = ""
+    df["Rank"] = pd.to_numeric(df["Rank"], errors="coerce").fillna(0).astype(int)
     df["Score"] = pd.to_numeric(df["Score"], errors="coerce").fillna(0)
     mx = df["Score"].max()
     df["Score"] = ((df["Score"] / mx * 100) if mx > 100 else df["Score"]).round(1)
@@ -185,7 +186,7 @@ def main():
         st.markdown('<div class="sidebar-section">Search</div>', unsafe_allow_html=True)
         search_query = st.text_input("Search grants", placeholder="Keyword, funder…")
         st.markdown('<div class="sidebar-section">Sort</div>', unsafe_allow_html=True)
-        sort_by = st.selectbox("Sort by", ["Score (high→low)", "Score (low→high)", "Deadline (soonest)", "Funder A-Z"])
+        sort_by = st.selectbox("Sort by", ["Rank (low→high)", "Score (high→low)", "Score (low→high)", "Deadline (soonest)", "Funder A-Z"])
 
     # ── Filtering ──
     f = df.copy()
@@ -220,10 +221,11 @@ def main():
         ]
 
     sort_map = {
-        "Score (high→low)": ("Score", False), "Score (low→high)": ("Score", True),
-        "Deadline (soonest)": ("Next Deadline", True), "Funder A-Z": ("Funder", True),
+        "Rank (low→high)": ("Rank", True), "Score (high→low)": ("Score", False),
+        "Score (low→high)": ("Score", True), "Deadline (soonest)": ("Next Deadline", True),
+        "Funder A-Z": ("Funder", True),
     }
-    col_s, asc_s = sort_map.get(sort_by, ("Score", False))
+    col_s, asc_s = sort_map.get(sort_by, ("Rank", True))
     f = f.sort_values(col_s, ascending=asc_s, na_position="last")
 
     # ── Header ──
@@ -263,7 +265,9 @@ def main():
                 url = row["Grant URL"]
                 website_url = row.get("Website URL", "")
                 dl_text, dl_class = deadline_label(row["Next Deadline"])
-                with st.expander(f"{'⭐ ' if score >= 80 else ''}{row['Grant Name']} — {row['Funder']}", expanded=False):
+                rank = row.get("Rank", 0)
+                rank_prefix = f"#{rank} · " if rank else ""
+                with st.expander(f"{'⭐ ' if score >= 80 else ''}{rank_prefix}{row['Grant Name']} — {row['Funder']}", expanded=False):
                     c1, c2, c3 = st.columns([3, 2, 2])
                     with c1:
                         st.markdown(f"{score_pill_html(score)} {status_badge_html(row['Status'])}", unsafe_allow_html=True)
@@ -436,12 +440,13 @@ Each grant becomes a Monday.com item with its name as the title and a comment co
 
     # ── Tab 5: Raw Table ──
     with tab_table:
-        disp_cols = ["Score", "Grant Name", "Funder", "Status", "Next Deadline",
+        disp_cols = ["Rank", "Score", "Grant Name", "Funder", "Status", "Next Deadline",
                      "Funding Cycle", "Grant URL", "Website URL"]
         disp = f[[c for c in disp_cols if c in f.columns]].copy()
         disp["Score"] = disp["Score"].apply(lambda x: f"{x:.1f}%")
         disp["Next Deadline"] = f["_dl_date"].apply(lambda d: d.isoformat() if d else "Rolling / TBD")
         st.dataframe(disp, use_container_width=True, hide_index=True, column_config={
+            "Rank":        st.column_config.NumberColumn("Rank"),
             "Grant URL":   st.column_config.LinkColumn("Grant URL",   display_text="🔗 Link"),
             "Website URL": st.column_config.LinkColumn("Website URL", display_text="🌐 Link"),
             "Score":       st.column_config.TextColumn("Match %"),
@@ -457,23 +462,23 @@ Each grant becomes a Monday.com item with its name as the title and a comment co
 def demo_data():
     today = date.today()
     rows = [
-        [92, "Climate Resilience Fund", "Bezos Earth Fund",
+        [1, 92, "Climate Resilience Fund", "Bezos Earth Fund",
          (pd.Timestamp(today) + pd.Timedelta(days=25)).strftime("%Y-%m-%d"),
          "Active", "Annual", "https://example.com/1", "https://bezos.com",
          "Supports innovative approaches to climate resilience in coastal communities.\n\nFunds projects that demonstrate measurable impact on community adaptation to changing climate conditions. Priority given to Indigenous-led initiatives and frontline communities."],
-        [85, "Green Infrastructure Grant", "Patagonia Environmental",
+        [2, 85, "Green Infrastructure Grant", "Patagonia Environmental",
          (pd.Timestamp(today) + pd.Timedelta(days=60)).strftime("%Y-%m-%d"),
          "Researching", "Biannual", "https://example.com/2", "https://patagonia.com",
          "Funding for urban green infrastructure projects including green roofs, rain gardens, and urban tree canopy expansion. Focus on equity and underserved communities."],
-        [78, "Community Health Initiative", "Robert Wood Johnson",
+        [3, 78, "Community Health Initiative", "Robert Wood Johnson",
          (pd.Timestamp(today) + pd.Timedelta(days=90)).strftime("%Y-%m-%d"),
          "Applied", "Rolling", "https://example.com/3", "https://rwjf.org",
          "Improving health outcomes in rural communities through preventive care and mental health services."],
-        [65, "Watershed Restoration", "Gordon & Betty Moore",
+        [4, 65, "Watershed Restoration", "Gordon & Betty Moore",
          (pd.Timestamp(today) - pd.Timedelta(days=5)).strftime("%Y-%m-%d"),
          "Invited", "Annual", "https://example.com/4", "https://moore.org",
          "Protecting critical watershed ecosystems through strategic land conservation and restoration."],
-        [88, "Biodiversity Conservation", "Wilburforce Foundation",
+        [5, 88, "Biodiversity Conservation", "Wilburforce Foundation",
          (pd.Timestamp(today) + pd.Timedelta(days=10)).strftime("%Y-%m-%d"),
          "Awarded", "Annual", "https://example.com/7", "https://wilburforce.org",
          "Protecting endangered species and critical habitat across the Rocky Mountain region."],
