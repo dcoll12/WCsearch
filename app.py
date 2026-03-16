@@ -6,9 +6,25 @@ import numpy as np
 import json
 import requests
 import os
+import re
+import io
+from collections import Counter
 from datetime import datetime, date, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
+
+# Optional document parsing libraries
+try:
+    import pypdf
+    HAS_PYPDF = True
+except ImportError:
+    HAS_PYPDF = False
+
+try:
+    from docx import Document as DocxDocument
+    HAS_DOCX = True
+except ImportError:
+    HAS_DOCX = False
 
 st.set_page_config(page_title="Grant Research Dashboard", page_icon="🌿", layout="wide", initial_sidebar_state="expanded")
 
@@ -23,6 +39,7 @@ st.markdown("""<style>
 .match-bar-wrap { width: 100%; background: #2a2d3e; border-radius: 20px; height: 8px; margin-top: 4px; }
 .match-bar { height: 8px; border-radius: 20px; }
 .desc-box { background: #1e2235; border-left: 3px solid #2E7D32; padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 0.88rem; line-height: 1.65; white-space: pre-wrap; word-wrap: break-word; word-break: break-word; color: #d0d0d0; margin-top: 8px; max-height: 300px; overflow-y: auto; }
+.match-highlight { background: #1B5E20; border-left: 3px solid #4CAF50; padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 0.88rem; line-height: 1.65; color: #d0d0d0; margin-top: 8px; }
 </style>""", unsafe_allow_html=True)
 
 # Updated sheet ID and columns to match new spreadsheet format
@@ -56,6 +73,17 @@ def load_from_service_account(sheet_id, creds_json):
     creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
     gc = gspread.authorize(creds)
     return pd.DataFrame(gc.open_by_key(sheet_id).get_worksheet_by_id(int(SHEET_GID)).get_all_records())
+
+
+def load_from_uploaded_file(uploaded_file):
+    """Load grant data from an uploaded CSV or Excel file."""
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        return pd.read_csv(uploaded_file)
+    elif name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(uploaded_file)
+    else:
+        raise ValueError(f"Unsupported file type: {uploaded_file.name}. Please upload a CSV or Excel file.")
 
 
 def normalize_df(df):
@@ -100,6 +128,113 @@ def status_badge_html(s):
 def score_pill_html(score):
     c = match_color(score)
     return f'<span class="score-pill" style="background:{c}22;color:{c};border:1px solid {c}55;">{score:.0f}% match</span>'
+
+
+# ── Document matching helpers ──
+
+def extract_text_from_file(uploaded_file):
+    """Extract plain text from a PDF, DOCX, TXT, or CSV file."""
+    name = uploaded_file.name.lower()
+    raw_bytes = uploaded_file.read()
+
+    if name.endswith(".txt"):
+        return raw_bytes.decode("utf-8", errors="ignore")
+
+    if name.endswith(".pdf"):
+        if not HAS_PYPDF:
+            st.error("pypdf is not installed. Run `pip install pypdf` to enable PDF support.")
+            return ""
+        reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    if name.endswith(".docx"):
+        if not HAS_DOCX:
+            st.error("python-docx is not installed. Run `pip install python-docx` to enable DOCX support.")
+            return ""
+        doc = DocxDocument(io.BytesIO(raw_bytes))
+        return "\n".join(para.text for para in doc.paragraphs)
+
+    if name.endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(raw_bytes))
+        return " ".join(df.astype(str).values.flatten())
+
+    raise ValueError(f"Unsupported file type: {uploaded_file.name}. Use PDF, DOCX, TXT, or CSV.")
+
+
+# Stop-words to ignore when matching
+_STOP_WORDS = {
+    "the", "and", "for", "are", "but", "not", "you", "all", "can", "her",
+    "was", "one", "our", "out", "had", "have", "has", "his", "with", "this",
+    "that", "from", "they", "will", "been", "more", "when", "who", "its",
+    "into", "than", "then", "also", "any", "may", "new", "such", "use",
+    "each", "which", "their", "there", "these", "those", "been", "being",
+    "both", "other", "through", "during", "before", "after", "above", "below",
+    "between", "about", "under", "again", "further", "once", "only", "same",
+    "own", "just", "over", "should", "could", "would", "while", "where",
+    "very", "most", "some", "what", "well", "even", "make", "many", "how",
+}
+
+
+def _tokenize(text):
+    tokens = re.findall(r"\b[a-z]{3,}\b", text.lower())
+    return [t for t in tokens if t not in _STOP_WORDS]
+
+
+def compute_match_scores(profile_text, descriptions):
+    """
+    Score each grant description against the profile document using
+    TF-IDF cosine similarity implemented with plain Python/NumPy.
+
+    Returns a list of floats in [0, 100].
+    """
+    profile_tokens = _tokenize(profile_text)
+    if not profile_tokens:
+        return [0.0] * len(descriptions)
+
+    # Build vocabulary from profile + all descriptions
+    all_texts = [profile_text] + list(descriptions)
+    tokenized = [_tokenize(t) for t in all_texts]
+
+    vocab = sorted({tok for toks in tokenized for tok in toks})
+    vocab_index = {w: i for i, w in enumerate(vocab)}
+    n_docs = len(tokenized)
+
+    # TF matrix
+    tf = np.zeros((n_docs, len(vocab)), dtype=np.float32)
+    for d_idx, toks in enumerate(tokenized):
+        counts = Counter(toks)
+        total = max(len(toks), 1)
+        for w, cnt in counts.items():
+            if w in vocab_index:
+                tf[d_idx, vocab_index[w]] = cnt / total
+
+    # IDF vector
+    doc_freq = (tf > 0).sum(axis=0)
+    idf = np.log((n_docs + 1) / (doc_freq + 1)) + 1.0
+
+    # TF-IDF
+    tfidf = tf * idf
+
+    # Cosine similarity between profile (index 0) and each grant
+    profile_vec = tfidf[0]
+    grant_vecs = tfidf[1:]
+
+    norms = np.linalg.norm(grant_vecs, axis=1)
+    profile_norm = np.linalg.norm(profile_vec)
+
+    if profile_norm == 0:
+        return [0.0] * len(descriptions)
+
+    sims = np.dot(grant_vecs, profile_vec) / (norms * profile_norm + 1e-10)
+
+    # Normalise to 0-100
+    max_sim = sims.max()
+    if max_sim > 0:
+        scores = (sims / max_sim * 100).round(1).tolist()
+    else:
+        scores = [0.0] * len(descriptions)
+
+    return scores
 
 
 # ── Monday.com helpers ──
@@ -155,13 +290,27 @@ def main():
     with st.sidebar:
         st.markdown("# 🌿 Grant Tracker\n---")
         st.markdown('<div class="sidebar-section">Data Source</div>', unsafe_allow_html=True)
-        data_mode = st.radio("Connect via", ["Public sheet (CSV)", "Service account (private sheet)"], index=0)
+        data_mode = st.radio(
+            "Connect via",
+            ["Public sheet (CSV)", "Service account (private sheet)", "Upload CSV / Excel file"],
+            index=0,
+        )
         creds_json = None
+        uploaded_grants_file = None
+
         if data_mode == "Service account (private sheet)":
             uploaded = st.file_uploader("Service account key (.json)", type="json")
             if uploaded:
                 try: creds_json = json.load(uploaded)
                 except: st.error("Invalid JSON file.")
+
+        elif data_mode == "Upload CSV / Excel file":
+            uploaded_grants_file = st.file_uploader(
+                "Upload your grants file",
+                type=["csv", "xlsx", "xls"],
+                help="Upload a CSV or Excel file with columns: Rank, Score, Grant Name, Funder, Next Deadline, Status, Funding Cycle, Grant URL, Website URL, Description",
+            )
+
         if st.button("🔄 Refresh data", use_container_width=True):
             st.cache_data.clear(); st.rerun()
         st.markdown("---")
@@ -169,8 +318,19 @@ def main():
 
     with st.spinner("Loading grant data…"):
         try:
-            raw = load_from_public_csv(SHEET_ID) if data_mode == "Public sheet (CSV)" else load_from_service_account(SHEET_ID, creds_json)
-            df = normalize_df(raw.copy())
+            if data_mode == "Public sheet (CSV)":
+                raw = load_from_public_csv(SHEET_ID)
+            elif data_mode == "Service account (private sheet)":
+                raw = load_from_service_account(SHEET_ID, creds_json)
+            elif data_mode == "Upload CSV / Excel file":
+                if uploaded_grants_file is None:
+                    st.info("👆 Upload a CSV or Excel grants file in the sidebar to get started.")
+                    df = demo_data()
+                    raw = None
+                else:
+                    raw = load_from_uploaded_file(uploaded_grants_file)
+            if data_mode != "Upload CSV / Excel file" or uploaded_grants_file is not None:
+                df = normalize_df(raw.copy())
         except Exception as e:
             st.error(f"**Could not load data:** {e}\n\nMake sure the sheet is shared as 'Anyone with the link can view'.")
             df = demo_data()
@@ -249,8 +409,8 @@ def main():
             st.markdown(f'<div class="metric-card"><h1>{val}</h1><p>{label}</p></div>', unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    tab_list, tab_chart, tab_deadline, tab_monday, tab_table = st.tabs([
-        "📋 Grant List", "📊 Analytics", "📅 Deadline Calendar", "📌 Monday.com", "🗂 Raw Table"
+    tab_list, tab_match, tab_chart, tab_deadline, tab_monday, tab_table = st.tabs([
+        "📋 Grant List", "🔍 Match by Document", "📊 Analytics", "📅 Deadline Calendar", "📌 Monday.com", "🗂 Raw Table"
     ])
 
     # ── Tab 1: Grant List ──
@@ -284,14 +444,178 @@ def main():
                     if desc:
                         st.markdown("---")
                         st.markdown("**Description:**")
-                        # Escape HTML entities then render in a styled box that preserves line breaks
                         desc_safe = (desc
                                      .replace("&", "&amp;")
                                      .replace("<", "&lt;")
                                      .replace(">", "&gt;"))
                         st.markdown(f'<div class="desc-box">{desc_safe}</div>', unsafe_allow_html=True)
 
-    # ── Tab 2: Analytics ──
+    # ── Tab 2: Match by Document ──
+    with tab_match:
+        st.markdown("## 🔍 Match by Document")
+        st.markdown(
+            "Upload a document describing your organization, project, or mission. "
+            "The app will score every grant in the current dataset by how well it matches your profile — "
+            "no spreadsheet linking required."
+        )
+
+        supported_types = ["txt"]
+        if HAS_PYPDF:
+            supported_types.append("pdf")
+        if HAS_DOCX:
+            supported_types.append("docx")
+        supported_types += ["csv"]
+
+        profile_file = st.file_uploader(
+            "Upload your organization profile",
+            type=supported_types,
+            help=f"Supported: {', '.join(t.upper() for t in supported_types)}. "
+                 "Describe your org's mission, focus areas, past work, and priorities.",
+        )
+
+        if not HAS_PYPDF or not HAS_DOCX:
+            missing = []
+            if not HAS_PYPDF: missing.append("`pypdf` (for PDF)")
+            if not HAS_DOCX:  missing.append("`python-docx` (for DOCX)")
+            st.caption(f"ℹ️ Install {' and '.join(missing)} to enable those file types.")
+
+        if profile_file is not None:
+            with st.spinner("Extracting text from document…"):
+                try:
+                    profile_text = extract_text_from_file(profile_file)
+                except Exception as e:
+                    st.error(f"Could not read file: {e}")
+                    profile_text = ""
+
+            if profile_text.strip():
+                word_count = len(profile_text.split())
+                st.success(f"Document loaded — {word_count:,} words extracted.")
+
+                with st.expander("Preview extracted text", expanded=False):
+                    preview = profile_text[:2000] + ("…" if len(profile_text) > 2000 else "")
+                    st.text(preview)
+
+                with st.spinner("Computing match scores…"):
+                    descriptions = df["Description"].fillna("").tolist()
+                    # Combine grant name and funder into description for richer matching
+                    combined = (
+                        df["Grant Name"].fillna("") + " " +
+                        df["Funder"].fillna("") + " " +
+                        df["Description"].fillna("")
+                    ).tolist()
+                    raw_scores = compute_match_scores(profile_text, combined)
+
+                matched_df = df.copy()
+                matched_df["Doc Match %"] = [round(s, 1) for s in raw_scores]
+                matched_df = matched_df.sort_values("Doc Match %", ascending=False)
+
+                st.markdown("---")
+                st.markdown(f"### Top Matches — {len(matched_df)} grants ranked")
+
+                # Top-match summary bar chart
+                top_n = matched_df.head(15).copy()
+                fig_top = px.bar(
+                    top_n,
+                    x="Doc Match %",
+                    y="Grant Name",
+                    orientation="h",
+                    color="Doc Match %",
+                    color_continuous_scale=["#EF5350", "#FF9800", "#4CAF50"],
+                    title="Top 15 Grants by Document Match Score",
+                    template="plotly_dark",
+                    text="Doc Match %",
+                )
+                fig_top.update_traces(texttemplate="%{text:.0f}%", textposition="outside")
+                fig_top.update_layout(
+                    paper_bgcolor="#1A1D27", plot_bgcolor="#1A1D27",
+                    coloraxis_showscale=False,
+                    yaxis={"categoryorder": "total ascending"},
+                    margin=dict(t=40, b=20, l=20, r=20),
+                    xaxis_title="Doc Match %", yaxis_title="",
+                )
+                st.plotly_chart(fig_top, use_container_width=True)
+
+                # Threshold filter
+                min_score = st.slider(
+                    "Minimum document match score to display",
+                    0, 100, 30,
+                    help="Hide grants below this match threshold.",
+                )
+                display_df = matched_df[matched_df["Doc Match %"] >= min_score]
+                st.markdown(f"Showing **{len(display_df)}** grants above {min_score}% document match")
+
+                for _, row in display_df.iterrows():
+                    doc_score = row["Doc Match %"]
+                    sheet_score = row["Score"]
+                    bar_color = match_color(doc_score)
+                    url = row["Grant URL"]
+                    website_url = row.get("Website URL", "")
+                    dl_text, dl_class = deadline_label(row["Next Deadline"])
+
+                    with st.expander(
+                        f"{'⭐ ' if doc_score >= 80 else ''}{row['Grant Name']} — {row['Funder']}",
+                        expanded=False,
+                    ):
+                        c1, c2, c3 = st.columns([3, 2, 2])
+                        with c1:
+                            doc_color = match_color(doc_score)
+                            st.markdown(
+                                f'<span class="score-pill" style="background:{doc_color}22;color:{doc_color};border:1px solid {doc_color}55;">🔍 {doc_score:.0f}% doc match</span> '
+                                f"{status_badge_html(row['Status'])}",
+                                unsafe_allow_html=True,
+                            )
+                            st.markdown(f'<div class="match-bar-wrap"><div class="match-bar" style="width:{doc_score}%;background:{bar_color};"></div></div>', unsafe_allow_html=True)
+                            st.markdown(f"**Funder:** {row['Funder']}")
+                            if row["Funding Cycle"]: st.markdown(f"**Cycle:** {row['Funding Cycle']}")
+                        with c2:
+                            st.markdown(f'**Deadline:** <span class="{dl_class}">{dl_text}</span>', unsafe_allow_html=True)
+                            if url.startswith("http"): st.markdown(f"[🔗 Grant URL]({url})")
+                            if website_url.startswith("http"): st.markdown(f"[🌐 Website]({website_url})")
+                        with c3:
+                            st.markdown(f"**Doc Match:** `{doc_score:.1f}%`")
+                            st.markdown(f"**Sheet Score:** `{sheet_score:.1f}%`")
+                        desc = row.get("Description", "").strip()
+                        if desc:
+                            st.markdown("---")
+                            st.markdown("**Description:**")
+                            desc_safe = (desc
+                                         .replace("&", "&amp;")
+                                         .replace("<", "&lt;")
+                                         .replace(">", "&gt;"))
+                            st.markdown(f'<div class="desc-box">{desc_safe}</div>', unsafe_allow_html=True)
+
+                # Download matched results
+                st.markdown("---")
+                export_cols = ["Grant Name", "Funder", "Doc Match %", "Score", "Status",
+                               "Next Deadline", "Funding Cycle", "Grant URL", "Website URL", "Description"]
+                export_df = display_df[[c for c in export_cols if c in display_df.columns]].copy()
+                export_df["Next Deadline"] = display_df["_dl_date"].apply(
+                    lambda d: d.isoformat() if d else "Rolling / TBD"
+                )
+                st.download_button(
+                    "⬇️ Download matched results as CSV",
+                    data=export_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"doc_matched_grants_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.warning("Could not extract any text from the uploaded file. Please try a different file.")
+        else:
+            st.markdown("""
+**How it works:**
+1. Upload a TXT, PDF, DOCX, or CSV file describing your organization's mission, programs, and focus areas
+2. The app analyzes the text and computes a similarity score for every grant based on keyword overlap
+3. Grants are re-ranked by how well they match *your specific profile*
+4. Download the results as a CSV
+
+**Tips for best results:**
+- Include your mission statement, program descriptions, and geographic focus
+- Mention specific topics: conservation, health equity, climate resilience, etc.
+- Longer, more detailed documents produce more accurate matches
+- No Google Sheets connection needed — upload a grants CSV directly via the sidebar
+""")
+
+    # ── Tab 3: Analytics ──
     with tab_chart:
         if f.empty:
             st.info("No data to chart.")
@@ -344,7 +668,7 @@ def main():
                     fig4.add_vline(x=30, line_dash="dot", line_color="#FF9800", annotation_text="30d")
                     st.plotly_chart(fig4, use_container_width=True)
 
-    # ── Tab 3: Deadline Calendar ──
+    # ── Tab 4: Deadline Calendar ──
     with tab_deadline:
         dated = f[f["Next Deadline"].notna()].copy().sort_values("Next Deadline")
         if dated.empty:
@@ -375,7 +699,7 @@ def main():
                     link = f"[{row['Grant Name']}]({url})" if url.startswith("http") else row["Grant Name"]
                     st.markdown(f"{urgency} **{link}** — {row['Funder']} — {score_pill_html(row['Score'])} — {dl_text}", unsafe_allow_html=True)
 
-    # ── Tab 4: Monday.com ──
+    # ── Tab 5: Monday.com ──
     with tab_monday:
         st.markdown("## 📌 Push Grants to Monday.com")
         st.markdown("Push your filtered grants to a Monday.com board as items — then track status, assign owners, and set reminders natively in Monday.")
@@ -438,7 +762,7 @@ def main():
 Each grant becomes a Monday.com item with its name as the title and a comment containing match score, funder, deadline, status, URLs, and description.
 """)
 
-    # ── Tab 5: Raw Table ──
+    # ── Tab 6: Raw Table ──
     with tab_table:
         disp_cols = ["Rank", "Score", "Grant Name", "Funder", "Status", "Next Deadline",
                      "Funding Cycle", "Grant URL", "Website URL"]
